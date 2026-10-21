@@ -15,6 +15,46 @@ from datetime import datetime
 import pandas as pd
 
 
+def _load_cboe(symbol, min_open_interest=1, max_iv=3.0):
+    """Chaine d'options via CBOE (gratuit, fonctionne sur Streamlit Cloud)."""
+    import re
+    import requests
+    url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
+    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.cboe.com/"})
+    r.raise_for_status()
+    data = r.json()["data"]
+    spot = float(data["current_price"])
+    now = datetime.now()
+    pat = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
+    rows = []
+    for o in data["options"]:
+        m = pat.match(o.get("option", ""))
+        if not m:
+            continue
+        expiry = datetime.strptime(m.group(2), "%y%m%d")
+        bid = float(o.get("bid") or 0)
+        ask = float(o.get("ask") or 0)
+        last = float(o.get("last_trade_price") or 0)
+        rows.append({
+            "strike": int(m.group(4)) / 1000,
+            "type": "Call" if m.group(3) == "C" else "Put",
+            "expiry": expiry,
+            "days": max(1, (expiry - now).days),
+            "iv": float(o.get("iv") or 0),
+            "open_interest": float(o.get("open_interest") or 0),
+            "volume": float(o.get("volume") or 0),
+            "premium": last if last > 0 else (bid + ask) / 2,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise ValueError(f"CBOE vide pour {symbol}")
+    df = df[(df["open_interest"] >= min_open_interest) & (df["iv"] > 0.001) & (df["iv"] < max_iv)]
+    if df.empty:
+        raise ValueError(f"CBOE : aucune option valide pour {symbol}")
+    cols = ["strike", "type", "expiry", "days", "iv", "open_interest", "volume", "premium"]
+    return spot, df[cols].reset_index(drop=True)
+
+
 def load_yf_options(symbol: str, min_open_interest: int = 1, max_iv: float = 3.0):
     """
     Charge la chaine d'options complete pour un ticker proxy (QQQ, SPY, GLD).
@@ -25,6 +65,11 @@ def load_yf_options(symbol: str, min_open_interest: int = 1, max_iv: float = 3.0
     df : DataFrame avec colonnes
          [strike, type, expiry, days, iv, open_interest, volume, premium]
     """
+    try:
+        return _load_cboe(symbol, min_open_interest, max_iv)
+    except Exception:
+        pass
+
     import yfinance as yf
 
     ticker = yf.Ticker(symbol)
@@ -53,6 +98,8 @@ def load_yf_options(symbol: str, min_open_interest: int = 1, max_iv: float = 3.0
             sub_df["days"] = days
             rows.append(sub_df)
 
+    if not rows:
+        raise ValueError(f"Aucune option pour {symbol} (CBOE et Yahoo vides). Reessaie dans quelques minutes.")
     full = pd.concat(rows, ignore_index=True)
     full = full.rename(
         columns={
