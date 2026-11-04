@@ -157,3 +157,96 @@ for asset_key, config in ASSET_CONFIG.items():
     if data:
         spot, zero_gamma, result = data
         display_asset_card(asset_key, config, spot, zero_gamma, result)
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.divider()
+
+# =============================================
+# OBI + VPIN CONFLUENCE (SqueezeRadar)
+# =============================================
+st.subheader("🌊 Confluence OBI + VPIN — Flux informé")
+st.caption("Déséquilibre directionnel 1h · Probabilité flux institutionnel · NQ · ES · GC")
+
+import numpy as _np_sr
+import scipy.stats as _scipy_sr
+
+_SR_TICKERS  = {"NQ": "NQ=F", "ES": "ES=F", "GC": "GC=F"}
+_SR_OBI_WIN  = 5
+_SR_OBI_THR  = 0.05
+_SR_VPIN_WIN = 20
+_SR_VPIN_THR = 0.60
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_sr_flow(ticker):
+    try:
+        import yfinance as _yf
+        from datetime import datetime as _dt, timedelta as _td
+        start = (_dt.today() - _td(days=720)).strftime("%Y-%m-%d")
+        df = _yf.download(ticker, start=start, interval="1h",
+                          progress=False, auto_adjust=True)
+        if df.empty or len(df) < 30:
+            return None
+        if isinstance(df.columns, __import__('pandas').MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df[['Open','High','Low','Close','Volume']].dropna()
+        hl   = (df['High'] - df['Low']).replace(0, _np_sr.nan)
+        bp   = ((df['Close'] - df['Open']) / hl).fillna(0)
+        obi  = float(bp.rolling(_SR_OBI_WIN, min_periods=2).mean().iloc[-1])
+        v_buy  = df['Volume'] * (df['Close'] > df['Open']).astype(float)
+        v_sell = df['Volume'] * (df['Close'] < df['Open']).astype(float)
+        vtot   = df['Volume'].replace(0, _np_sr.nan)
+        vpin   = float(((v_buy - v_sell).abs() / vtot)
+                       .rolling(_SR_VPIN_WIN, min_periods=5).mean().iloc[-1])
+        return {"obi": obi, "vpin": vpin}
+    except Exception:
+        return None
+
+_sr_cols = st.columns(3)
+_sr_instruments = list(_SR_TICKERS.items())
+
+with st.spinner("Chargement flux OBI+VPIN…"):
+    for _ci, (instr, ticker) in enumerate(_sr_instruments):
+        r = _load_sr_flow(ticker)
+        with _sr_cols[_ci]:
+            if r is None:
+                st.warning(f"{instr} — données indisponibles")
+                continue
+            obi_v  = r["obi"]
+            vpin_v = r["vpin"]
+            bull = obi_v >  _SR_OBI_THR and vpin_v >= _SR_VPIN_THR
+            bear = obi_v < -_SR_OBI_THR and vpin_v >= _SR_VPIN_THR
+            if bull:
+                sig, color, emoji = "HAUSSIER", "#3FB950", "🟢"
+            elif bear:
+                sig, color, emoji = "BAISSIER", "#F85149", "🔴"
+            else:
+                sig, color, emoji = "NEUTRE", "#8B949E", "⚪"
+            obi_str  = f"+{obi_v:.3f}" if obi_v >= 0 else f"{obi_v:.3f}"
+            vpin_str = f"{vpin_v:.2f}"
+            st.markdown(f"""
+<div style="background:#161B22;border:1px solid {color};border-radius:10px;padding:16px;text-align:center">
+  <div style="font-size:1.4rem;font-weight:700;color:{color}">{emoji} {instr}</div>
+  <div style="font-size:1.05rem;color:{color};margin:6px 0">{sig}</div>
+  <div style="color:#8B949E;font-size:0.85rem;margin-top:8px">
+    OBI&nbsp;<span style="color:#E6EDF3;font-weight:600">{obi_str}</span>
+    &nbsp;|&nbsp;
+    VPIN&nbsp;<span style="color:#BC8CFF;font-weight:600">{vpin_str}</span>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+with st.expander("📖 Comment lire OBI + VPIN", expanded=False):
+    st.markdown("""
+**OBI — Order Book Imbalance (5 barres 1h)**  
+`OBI = moyenne( (Close − Open) / (High − Low) )`  
+• `> +0.05` → pression acheteuse dominante 🟢  
+• `< −0.05` → pression vendeuse dominante 🔴  
+
+**VPIN proxy — Flux informé (20 barres 1h)**  
+`VPIN = moyenne( |V_buy − V_sell| / V_total )`  
+• `≥ 0.60` → flux institutionnel actif  
+• `< 0.60` → flux retail / bruit  
+
+**Signal** = OBI directionnel **ET** VPIN ≥ 0.60 → confluence flux + direction
+""")
